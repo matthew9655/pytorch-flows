@@ -17,6 +17,7 @@ import datasets
 import flows as fnn
 import utils
 from utils import plot_pca
+from MLP import MLP
 
 if sys.version_info < (3, 6):
     print('Sorry, this code might need Python 3.6 or higher')
@@ -73,7 +74,26 @@ parser.add_argument(
     action='store_true',
     default=False,
 )
-
+parser.add_argument(
+    '--flow_num_hidden',
+    type=int,
+    default=512
+)
+parser.add_argument(
+    '--mlp_num_hidden',
+    type=int,
+    default=64
+)
+parser.add_argument(
+    '--cond_inputs',
+    type=int,
+    default=10
+)
+parser.add_argument(
+    '--cond_inputs',
+    type=int,
+    default=10
+)
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
 device = torch.device("cuda:0" if args.cuda else "cpu")
@@ -85,9 +105,11 @@ if args.cuda:
 kwargs = {'num_workers': 4, 'pin_memory': True} if args.cuda else {}
 
 assert args.dataset in [
-    'POWER', 'GAS', 'HEPMASS', 'MINIBONE', 'BSDS300', 'MOONS', 'MNIST'
+    'POWER', 'GAS', 'HEPMASS', 'MINIBONE', 'BSDS300', 'MOONS', 'MNIST', 'Bimodal'
 ]
-dataset = getattr(datasets, args.dataset)()
+#####
+sigma = True
+dataset = getattr(datasets, args.dataset)(sigma=sigma)
 print(dataset.trn.x.shape)
 print(dataset.trn.y.shape)
 print(dataset.val.x.shape)
@@ -104,13 +126,13 @@ if args.mini:
     val_ra = npr.randint(0, 10000, val_nums)
     tst_ra = npr.randint(0, 10000, test_nums)
 else:
-    trn_ra = np.arange(0, 50000, 1)
-    val_ra = np.arange(0, 10000, 1)
-    tst_ra = np.arange(0, 10000, 1)
+    trn_ra = np.arange(0, dataset.trn.N, 1)
+    val_ra = np.arange(0, dataset.val.N, 1)
+    tst_ra = np.arange(0, dataset.tst.N, 1)
 
 
 if args.cond:
-    assert args.flow in ['maf', 'realnvp'] and args.dataset == 'MNIST', \
+    assert args.flow in ['maf', 'realnvp'] and args.dataset in ['MNIST', 'Bimodal'], \
         'Conditional flows are implemented only for maf and MNIST'
     
     train_tensor = torch.from_numpy(dataset.trn.x[trn_ra])
@@ -124,7 +146,7 @@ if args.cond:
     test_tensor = torch.from_numpy(dataset.tst.x[tst_ra])
     test_labels = torch.from_numpy(dataset.tst.y[tst_ra])
     test_dataset = torch.utils.data.TensorDataset(test_tensor, test_labels)
-    num_cond_inputs = 10
+    num_cond_inputs = dataset.trn.y.shape[1]
 else:
     train_tensor = torch.from_numpy(dataset.trn.x)
     train_dataset = torch.utils.data.TensorDataset(train_tensor)
@@ -154,17 +176,10 @@ test_loader = torch.utils.data.DataLoader(
     **kwargs)
 
 num_inputs = dataset.n_dims
-num_hidden = {
-    'POWER': 100,
-    'GAS': 100,
-    'HEPMASS': 512,
-    'MINIBOONE': 512,
-    'BSDS300': 512,
-    'MOONS': 64,
-    'MNIST': 1024
-}[args.dataset]
 
-act = 'tanh' if args.dataset is 'GAS' else 'relu'
+num_hidden = args.num_hidden
+
+act = 'tanh' if args.dataset == 'GAS' else 'relu'
 
 modules = []
 
@@ -227,16 +242,18 @@ for module in model.modules():
         if hasattr(module, 'bias') and module.bias is not None:
             module.bias.data.fill_(0)
 
+mlp = MLP()
+mlp.to(device)
 model.to(device)
 
 optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-6)
 
-writer = SummaryWriter(comment=args.flow + "_" + args.dataset)
+writer = SummaryWriter(comment=f'{args.num_hidden}')
 global_step = 0
 
 def train(epoch):
     global global_step, writer
-    model.train()
+    model().train()
     train_loss = 0
 
     pbar = tqdm(total=len(train_loader.dataset))
@@ -251,6 +268,7 @@ def train(epoch):
             data = data[0]
         data = data.to(device)
         optimizer.zero_grad()
+        cond_data = mlp(cond_data)
         loss = -model.log_probs(data, cond_data).mean()
         train_loss += loss.item()
         loss.backward()
@@ -324,7 +342,7 @@ for epoch in range(args.epochs):
     train(epoch)
     validation_loss = validate(epoch, model, valid_loader)
 
-    if epoch - best_validation_epoch >= 30:
+    if epoch - best_validation_epoch >= 50:
         break
 
     if validation_loss < best_validation_loss:
@@ -340,6 +358,8 @@ for epoch in range(args.epochs):
         utils.save_moons_plot(epoch, model, dataset)
     elif args.dataset == 'MNIST' and epoch % 5 == 0:
         utils.save_images(epoch, model, args.cond)
+    elif args.dataset == 'Bimodal' and epoch % 1 == 0:
+        utils.sample_dist(epoch, model, sigma=sigma)
 
 
 validate(best_validation_epoch, best_model, test_loader, prefix='Test')

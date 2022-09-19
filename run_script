@@ -1,0 +1,4 @@
+#!/bin/bash
+rm -f -r dist_images/*.png
+rm -f -r scatter_plots/*.png
+python3 bimodal_run.py --cond --dataset Bimodal --epochs 100 --num_hidden 256
